@@ -5,6 +5,7 @@
 """LLM client construction and structured-output invocation wrappers."""
 
 import contextlib
+import json
 import logging
 import os
 import random
@@ -211,6 +212,41 @@ _NON_REASONING_MODEL_NAME = resolve("NON_REASONING", "MODEL")
 _NON_REASONING_API_KEY = resolve("NON_REASONING", "API_KEY")
 
 
+# Fork: which client library talks to a non-``openai/`` model. ``auto`` keeps
+# ChatNVIDIA for NVIDIA endpoints and uses ChatOpenAI for everything else that
+# is a known OpenAI-compatible gateway; ``openai`` / ``nvidia`` force one.
+_LLM_CLIENT = os.environ.get("LLM_CLIENT", "auto").strip().lower()
+_OPENAI_COMPATIBLE_HOSTS = ("openrouter.ai",)
+
+
+def _uses_openai_client(base_url: str) -> bool:
+    if _LLM_CLIENT == "openai":
+        return True
+    if _LLM_CLIENT == "nvidia":
+        return False
+    return any(host in (base_url or "").lower() for host in _OPENAI_COMPATIBLE_HOSTS)
+
+
+def _load_extra_body() -> dict | None:
+    """``LLM_EXTRA_BODY``: JSON merged into every OpenAI-client request body,
+    e.g. OpenRouter provider routing or reasoning settings."""
+    raw = os.environ.get("LLM_EXTRA_BODY", "").strip()
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        logger.error("LLM_EXTRA_BODY is not valid JSON; ignoring it")
+        return None
+    if not isinstance(value, dict):
+        logger.error("LLM_EXTRA_BODY must be a JSON object; ignoring it")
+        return None
+    return value
+
+
+_LLM_EXTRA_BODY = _load_extra_body()
+
+
 def _build_client(
     *,
     model: str,
@@ -239,6 +275,25 @@ def _build_client(
             max_tokens=max_tokens,
             timeout=LLM_INVOKE_TIMEOUT_S,
             max_retries=0,
+            extra_body=_LLM_EXTRA_BODY,
+        )
+
+    if _uses_openai_client(base_url):
+        # Fork: generic OpenAI-compatible gateways (OpenRouter, ...). ChatNVIDIA
+        # would request structured output through NVIDIA's ``nvext.guided_json``,
+        # which these gateways ignore, so every structured call came back
+        # unparsed (None). ChatOpenAI uses ``response_format`` instead.
+        from langchain_openai import ChatOpenAI
+
+        return ChatOpenAI(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=LLM_INVOKE_TIMEOUT_S,
+            max_retries=0,
+            extra_body=_LLM_EXTRA_BODY,
         )
 
     from langchain_nvidia_ai_endpoints import ChatNVIDIA
