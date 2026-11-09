@@ -245,7 +245,7 @@ class SQLGenerationModel(StrictModel):
     response: NonEmptyStr = Field(
         ...,
         description=(
-            "User-facing summary in plain English (2-4 sentences): describe what "
+            "User-facing summary in the language of the user's question (2-4 sentences): describe what "
             "is being calculated, which tables and columns are used, any filters "
             "or time windows applied, and the grouping/ordering. Refer to tables "
             "and columns by their human-readable names. "

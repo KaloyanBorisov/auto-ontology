@@ -293,7 +293,7 @@ _SQL_GENERATION_OUTPUT_SPEC = """Output (fill fields in this exact order):
   denominator), and ties (what breaks a tie in a ranking/superlative
   query).
 - sql_code: the complete SQL, no comments or delimiters.
-- response: 2-4 sentences for the end user, in plain English. Describe WHAT is
+- response: 2-4 sentences for the end user, in the language of the user's question. Describe WHAT is
   being calculated, WHICH tables and columns are used, any FILTERS or time
   windows applied, and the GROUPING/ORDERING.
   Do NOT include SQL and code fences, raw identifiers like ``schema.table``,
