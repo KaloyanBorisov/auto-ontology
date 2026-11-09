@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -45,3 +46,26 @@ def load_system_prompt() -> str:
         "Use clear, human-readable Term names with spaces between words and precise "
         "business language."
     )
+
+
+def output_language_instruction() -> str:
+    """Extra system-prompt rules for the language of generated text (fork).
+
+    ``SEMANTIC_OUTPUT_LANGUAGE`` (e.g. ``Bulgarian``) asks for descriptions and
+    extra synonyms in that language; Term names and display labels stay in
+    English, which the label validation requires. ``SEMANTIC_CONTEXT`` is free
+    text about the source data (what the abbreviations mean, where it comes
+    from). Both unset returns "" and leaves the upstream prompts unchanged.
+    """
+    language = os.environ.get("SEMANTIC_OUTPUT_LANGUAGE", "").strip()
+    context = os.environ.get("SEMANTIC_CONTEXT", "").strip()
+    parts: list[str] = []
+    if context:
+        parts.append(f"Context about the source data: {context}")
+    if language:
+        parts.append(
+            f"Write every description in {language}. Keep Term names and "
+            f"display_name labels in English. Provide synonyms in {language} "
+            "(in its native script) and, where useful, in English."
+        )
+    return ("\n\n" + "\n".join(parts)) if parts else ""

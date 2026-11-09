@@ -13,6 +13,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from auto_ontology.semantic.domain import output_language_instruction
 from auto_ontology.semantic.date_format import is_date_type
 from auto_ontology.semantic.models import ColumnAttributeSpec, ColumnDescriptionResult
 from auto_ontology.utils.llm_invoke import (
@@ -142,7 +143,9 @@ def _describe_column_batch(
         result = invoke_with_structured_output(
             get_llm_client(temperature=0.0),
             [
-                SystemMessage(content=_DESCRIPTION_SYSTEM),
+                SystemMessage(
+                    content=_DESCRIPTION_SYSTEM + output_language_instruction()
+                ),
                 HumanMessage(content=prompt),
             ],
             ColumnDescriptionResult,

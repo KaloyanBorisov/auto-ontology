@@ -12,7 +12,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from auto_ontology.semantic.deterministic import to_term_name
-from auto_ontology.semantic.domain import DomainSummary
+from auto_ontology.semantic.domain import DomainSummary, output_language_instruction
 from auto_ontology.utils.llm_invoke import (
     get_llm_client,
     invoke_with_structured_output,
@@ -176,6 +176,7 @@ def _sanitize_result(
             TermProposal(
                 name=term_name,
                 description=raw_term.description.strip(),
+                synonyms=_clean_synonyms(raw_term.synonyms, term_name),
                 attributes=attributes,
             )
         )
@@ -198,6 +199,19 @@ def _sanitize_result(
     table_result = TableTermsResult(terms=sanitized_terms)
     apply_display_names_to_specs(table_result, specs)
     return table_result
+
+
+def _clean_synonyms(synonyms: list[str], term_name: str) -> list[str]:
+    """Strip, drop blanks and the Term's own name, de-duplicate, cap at 8."""
+    seen: set[str] = {term_name.casefold()}
+    cleaned: list[str] = []
+    for raw in synonyms:
+        syn = " ".join(str(raw).split())
+        if not syn or syn.casefold() in seen:
+            continue
+        seen.add(syn.casefold())
+        cleaned.append(syn)
+    return cleaned[:8]
 
 
 def _extract_synonyms(description: str) -> list[str]:
@@ -246,7 +260,10 @@ def extract_term(
     )
     result = invoke_with_structured_output(
         get_llm_client(temperature=0.0, max_tokens=4096),
-        [SystemMessage(content=_SYSTEM), HumanMessage(content=prompt)],
+        [
+            SystemMessage(content=_SYSTEM + output_language_instruction()),
+            HumanMessage(content=prompt),
+        ],
         RawTableTermsResult,
     )
     if result is None:
@@ -257,6 +274,6 @@ def extract_term(
     synonyms = _extract_synonyms(description)
     if synonyms:
         for term in table_result.terms:
-            term.synonyms = synonyms
+            term.synonyms = _clean_synonyms(synonyms + term.synonyms, term.name)
 
     return table_result

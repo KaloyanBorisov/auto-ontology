@@ -57,6 +57,13 @@ class RawTermProposal(BaseModel):
         ),
     )
     description: str = Field(default="", description="Short business definition.")
+    synonyms: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Other names business users would use for this Term (up to 8). "
+            "Empty when none apply."
+        ),
+    )
     attributes: list[TermColumnRef] = Field(
         default_factory=list,
         description=(
