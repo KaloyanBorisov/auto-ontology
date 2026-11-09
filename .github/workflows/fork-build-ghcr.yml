@@ -1,0 +1,171 @@
+# Fork-only workflow (KaloyanBorisov/auto-ontology).
+#
+# Manually builds the three Auto Ontology images from this fork and pushes them
+# to GHCR, so the local Docker Compose stack can pull them instead of building:
+#   ghcr.io/<owner>/auto-ontology           (backend + ingestion service)
+#   ghcr.io/<owner>/auto-ontology-frontend
+#   ghcr.io/<owner>/auto-ontology-mcp
+#
+# Every build is tagged with the short commit SHA. "latest" and an optional
+# custom tag are added on request. No secrets needed: GITHUB_TOKEN pushes to
+# this repo's own packages.
+
+name: Fork - Build images to GHCR
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag or SHA to build'
+        required: false
+        type: string
+        default: 'main'
+      tag:
+        description: 'Extra image tag (e.g. bg-1); the short SHA is always added'
+        required: false
+        type: string
+        default: ''
+      latest:
+        description: 'Also tag as latest'
+        required: false
+        type: boolean
+        default: true
+      arm64:
+        description: 'Also build linux/arm64 (much slower, emulated)'
+        required: false
+        type: boolean
+        default: false
+      images:
+        description: 'Which images to build'
+        required: false
+        type: choice
+        default: 'all'
+        options:
+          - all
+          - auto-ontology
+          - auto-ontology-frontend
+          - auto-ontology-mcp
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: fork-build-ghcr-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Select images
+        id: plan
+        env:
+          IMAGES: ${{ inputs.images }}
+        run: |
+          all='[
+            {"image":"auto-ontology","context":".","build-args":""},
+            {"image":"auto-ontology-frontend","context":"frontend","build-args":"PYTHON_API_URL=http://auto-ontology:3001"},
+            {"image":"auto-ontology-mcp","context":"mcp","build-args":""}
+          ]'
+          if [ "$IMAGES" = "all" ]; then
+            sel="$all"
+          else
+            sel="$(jq -c --arg i "$IMAGES" '[.[] | select(.image == $i)]' <<<"$all")"
+          fi
+          echo "matrix=$(jq -c '{include: .}' <<<"$sel")" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.image }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      # The frontend's PYTHON_API_URL is baked into the Next.js rewrites and
+      # matches the Compose/Helm backend service name.
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      INPUT_REF: ${{ inputs.ref }}
+      INPUT_TAG: ${{ inputs.tag }}
+      INPUT_LATEST: ${{ inputs.latest }}
+      INPUT_ARM64: ${{ inputs.arm64 }}
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Compute tags and platforms
+        id: meta
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          repo="ghcr.io/${owner}/${{ matrix.image }}"
+          sha="$(git rev-parse --short=12 HEAD)"
+          tags="${repo}:sha-${sha}"
+          if [ -n "$INPUT_TAG" ]; then
+            if ! printf '%s' "$INPUT_TAG" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'; then
+              echo "::error::Invalid tag: $INPUT_TAG"; exit 1
+            fi
+            tags="${tags},${repo}:${INPUT_TAG}"
+          fi
+          if [ "$INPUT_LATEST" = "true" ]; then
+            tags="${tags},${repo}:latest"
+          fi
+          platforms="linux/amd64"
+          if [ "$INPUT_ARM64" = "true" ]; then
+            platforms="linux/amd64,linux/arm64"
+          fi
+          {
+            echo "tags=${tags}"
+            echo "platforms=${platforms}"
+            echo "sha=${sha}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        if: ${{ inputs.arm64 }}
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: ${{ steps.meta.outputs.platforms }}
+          build-args: ${{ matrix.build-args }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
+            org.opencontainers.image.description=Auto Ontology (fork with Bulgarian-language patches)
+          provenance: false
+          push: true
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: Summary
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          echo "### ${{ matrix.image }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Built from \`$INPUT_REF\` (${{ steps.meta.outputs.sha }}):" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$TAGS" | tr ',' '\n' | sed 's/^/- `/; s/$/`/' >> "$GITHUB_STEP_SUMMARY"
