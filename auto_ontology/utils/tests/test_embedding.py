@@ -456,3 +456,123 @@ def test_first_attempt_success_does_not_sleep() -> None:
 
     assert result is not None and not result.empty
     assert slept == []
+
+
+# ---------------------------------------------------------------------------
+# Non-NVIDIA models (fork: OpenRouter / Qwen3 Embedding)
+# ---------------------------------------------------------------------------
+
+
+def _wide(request: httpx.Request) -> httpx.Response:
+    """A provider that ignores ``dimensions`` and returns 4096-wide vectors."""
+    body = json.loads(request.content)
+    data = [
+        {"object": "embedding", "index": i, "embedding": [3.0, 4.0] + [1.0] * 4094}
+        for i, _ in enumerate(body["input"])
+    ]
+    return httpx.Response(200, json={"object": "list", "data": data, "model": "m"})
+
+
+def _narrow(request: httpx.Request) -> httpx.Response:
+    body = json.loads(request.content)
+    data = [
+        {"object": "embedding", "index": i, "embedding": [0.6, 0.8]}
+        for i, _ in enumerate(body["input"])
+    ]
+    return httpx.Response(200, json={"object": "list", "data": data, "model": "m"})
+
+
+def _openrouter(**overrides: Any) -> EmbedParams:
+    return _params(
+        model_name="qwen/qwen3-embedding-8b",
+        embed_invoke_url="https://openrouter.ai/api/v1",
+        **overrides,
+    )
+
+
+def test_a_non_nvidia_endpoint_gets_no_nvidia_fields(endpoint, monkeypatch) -> None:
+    monkeypatch.setattr(embedding, "_EMBED_DIMENSIONS", 2048)
+    seen = endpoint(_wide)
+
+    embed_texts(["клиент"], _openrouter(), "passage")
+
+    body = json.loads(seen[0].content)
+    assert body == {
+        "model": "qwen/qwen3-embedding-8b",
+        "input": ["клиент"],
+        "encoding_format": "float",
+        "dimensions": 2048,
+    }
+
+
+def test_nvidia_fields_can_be_forced_on(endpoint, monkeypatch) -> None:
+    monkeypatch.setattr(embedding, "_EMBED_NVIDIA_EXTRAS", "true")
+    seen = endpoint(_ok)
+
+    embed_texts(["orders"], _openrouter(), "query")
+
+    assert json.loads(seen[0].content)["input_type"] == "query"
+
+
+def test_a_wider_matryoshka_vector_is_cut_and_renormalised(endpoint, monkeypatch) -> None:
+    monkeypatch.setattr(embedding, "_EMBED_DIMENSIONS", 2048)
+    endpoint(_wide)
+
+    [vector] = embed_texts(["клиент"], _openrouter(), "passage")
+
+    assert vector is not None and len(vector) == 2048
+    assert sum(x * x for x in vector) == pytest.approx(1.0)
+    assert vector[0] / vector[1] == pytest.approx(3.0 / 4.0)
+
+
+def test_a_narrower_vector_is_zero_padded_exactly(endpoint, monkeypatch) -> None:
+    monkeypatch.setattr(embedding, "_EMBED_DIMENSIONS", 2048)
+    endpoint(_narrow)
+
+    [vector] = embed_texts(["клиент"], _openrouter(), "passage")
+
+    assert vector == [0.6, 0.8] + [0.0] * 2046
+
+
+def test_without_dimensions_vectors_are_returned_as_is(endpoint) -> None:
+    endpoint(_narrow)
+
+    assert embed_texts(["x"], _openrouter(), "passage") == [[0.6, 0.8]]
+
+
+def test_a_too_wide_dimensions_setting_is_refused(monkeypatch) -> None:
+    monkeypatch.setattr(embedding, "_EMBED_DIMENSIONS", 4096)
+    with pytest.raises(RuntimeError, match="vector store holds 2048"):
+        embedding.fit_to_store([1.0] * 4096)
+
+
+@pytest.mark.parametrize(
+    ("input_type", "expected"),
+    [("query", "Instruct: find terms\nQuery: клиент"), ("passage", "клиент")],
+)
+def test_configured_prefixes_mark_the_role_in_the_text(
+    endpoint, monkeypatch, input_type: str, expected: str
+) -> None:
+    monkeypatch.setattr(embedding, "_EMBED_QUERY_PREFIX", "Instruct: find terms\nQuery: ")
+    monkeypatch.setattr(embedding, "_EMBED_PASSAGE_PREFIX", "")
+    seen = endpoint(_ok)
+
+    embed_texts(["клиент"], _openrouter(), input_type)
+
+    assert json.loads(seen[0].content)["input"] == [expected]
+
+
+def test_long_inputs_are_cut_client_side(endpoint, monkeypatch) -> None:
+    monkeypatch.setattr(embedding, "_EMBED_MAX_INPUT_CHARS", 5)
+    seen = endpoint(_ok)
+
+    embed_texts(["абвгдежзий"], _openrouter(), "passage")
+
+    assert json.loads(seen[0].content)["input"] == ["абвгд"]
+
+
+def test_prefix_env_reads_backslash_n_as_newline(monkeypatch) -> None:
+    monkeypatch.setenv("EMBED_QUERY_PREFIX", "Instruct: x\\nQuery: ")
+    assert embedding._env_prefix("EMBED_QUERY_PREFIX") == "Instruct: x\nQuery: "
+    monkeypatch.delenv("EMBED_QUERY_PREFIX")
+    assert embedding._env_prefix("EMBED_QUERY_PREFIX") is None

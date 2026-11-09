@@ -23,6 +23,7 @@ from __future__ import annotations
 import itertools
 import logging
 import math
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -56,6 +57,80 @@ _TEXT_PREFIXED_MODELS = ("nemotron-3.5-embed-1b-nvfp4",)
 _EMBED_ENDPOINT = resolve("EMBED", "ENDPOINT")
 _EMBED_MODEL = resolve("EMBED", "MODEL")
 _EMBED_API_KEY = resolve("EMBED", "API_KEY")
+
+# --- Non-NVIDIA embedding models (e.g. Qwen3 Embedding via OpenRouter) -------
+#
+# The vector store column is fixed at this width (see PostgresVDB.vector_size).
+STORE_VECTOR_SIZE = 2048
+
+
+def _env_int(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip()
+    return int(raw) if raw else None
+
+
+def _env_prefix(name: str) -> str | None:
+    """A text prefix from the environment; ``\\n`` is read as a newline, since
+    Compose env files cannot hold a literal one. Unset means "not configured"."""
+    if name not in os.environ:
+        return None
+    return os.environ[name].replace("\\n", "\n")
+
+
+# Set it (to 2048) for any model whose native width is not the store's. It is
+# sent as the OpenAI ``dimensions`` field, and every returned vector is then
+# fitted to the store: a Matryoshka model wider than the store (Qwen3 Embedding
+# 8B is 4096) is shortened here if a provider ignores the field -- the same
+# operation, keep the leading dims and re-normalise -- and a narrower one is
+# zero-padded, which leaves cosine similarity exact.
+_EMBED_DIMENSIONS = _env_int("EMBED_DIMENSIONS")
+
+# Instruction prefixes for asymmetric models that take the query/passage role in
+# the text rather than through NVIDIA's ``input_type`` field.
+_EMBED_QUERY_PREFIX = _env_prefix("EMBED_QUERY_PREFIX")
+_EMBED_PASSAGE_PREFIX = _env_prefix("EMBED_PASSAGE_PREFIX")
+
+# NVIDIA's extra request fields (input_type, truncate, modality). "auto" sends
+# them only to NVIDIA endpoints and models; other providers may reject them.
+_EMBED_NVIDIA_EXTRAS = os.environ.get("EMBED_NVIDIA_EXTRAS", "auto").strip().lower()
+
+# Client-side input cap in characters, for endpoints that ignore ``truncate``
+# and reject an over-long input (failing its whole batch).
+_EMBED_MAX_INPUT_CHARS = _env_int("EMBED_MAX_INPUT_CHARS")
+
+
+def _sends_nvidia_extras(params: "EmbedParams") -> bool:
+    if _EMBED_NVIDIA_EXTRAS in ("true", "1", "yes"):
+        return True
+    if _EMBED_NVIDIA_EXTRAS in ("false", "0", "no"):
+        return False
+    url = params.embed_invoke_url.lower()
+    return "nvidia.com" in url or params.model_name.lower().startswith("nvidia/")
+
+
+def fit_to_store(vector: list[float], width: int = STORE_VECTOR_SIZE) -> list[float]:
+    """Make *vector* exactly *width* long without changing what cosine ranks.
+
+    Narrower vectors are zero-padded, which leaves every dot product and norm
+    unchanged, so cosine similarity is exact. Wider vectors are cut to their
+    leading *width* dimensions and re-normalised -- correct only for
+    Matryoshka-trained models, which is what setting ``EMBED_DIMENSIONS``
+    declares.
+    """
+    n = len(vector)
+    if n == width:
+        return vector
+    if n < width:
+        return vector + [0.0] * (width - n)
+    if _EMBED_DIMENSIONS is not None and _EMBED_DIMENSIONS > width:
+        raise RuntimeError(
+            f"Embedding model returned {n} dimensions but the vector store holds "
+            f"{width}. For a Matryoshka model set EMBED_DIMENSIONS={width}; "
+            "otherwise pick a model that is at most this wide."
+        )
+    head = vector[:width]
+    norm = math.sqrt(sum(x * x for x in head)) or 1.0
+    return [x / norm for x in head]
 
 # Per-request retries inside the client, for 408/409/429/5xx and dropped
 # connections. They back off for seconds; the chunk-level retry below is the
@@ -150,6 +225,9 @@ def _client(params: EmbedParams) -> OpenAI:
 
 
 def _text_prefix(model_name: str, input_type: InputType) -> str:
+    configured = _EMBED_QUERY_PREFIX if input_type == "query" else _EMBED_PASSAGE_PREFIX
+    if configured is not None:
+        return configured
     if any(model in model_name for model in _TEXT_PREFIXED_MODELS):
         return f"{input_type}: "
     return ""
@@ -185,15 +263,23 @@ def embed_texts(
     prefix = _text_prefix(params.model_name, input_type)
 
     def _embed_batch(indices: tuple[int, ...]) -> None:
+        inputs = [prefix + stripped[i] for i in indices]
+        if _EMBED_MAX_INPUT_CHARS:
+            inputs = [text[:_EMBED_MAX_INPUT_CHARS] for text in inputs]
         response = client.embeddings.create(
             model=params.model_name,
-            input=[prefix + stripped[i] for i in indices],
+            input=inputs,
             encoding_format="float",
-            extra_body={
-                "input_type": input_type,
-                "truncate": "END",
-                "modality": params.embed_modality,
-            },
+            dimensions=_EMBED_DIMENSIONS if _EMBED_DIMENSIONS else Omit(),
+            extra_body=(
+                {
+                    "input_type": input_type,
+                    "truncate": "END",
+                    "modality": params.embed_modality,
+                }
+                if _sends_nvidia_extras(params)
+                else None
+            ),
             timeout=timeout or params.request_timeout_s,
             extra_headers=None if params.api_key else _NO_AUTH,
         )
@@ -207,7 +293,11 @@ def embed_texts(
                 f"for {len(indices)} input(s)."
             )
         for item in response.data:
-            vectors[indices[item.index]] = list(item.embedding)
+            vector = list(item.embedding)
+            # Opt-in, so NVIDIA's native 2048-wide models are untouched.
+            vectors[indices[item.index]] = (
+                fit_to_store(vector) if _EMBED_DIMENSIONS else vector
+            )
 
     if len(batches) == 1:
         _embed_batch(batches[0])
