@@ -273,6 +273,87 @@ the frontend forwards in the `x-auto-ontology-user-id` header, and the ingestion
 service's endpoints (ingest, delete, reset, compile) have no authentication of
 their own. Clients go through the web app on port 3000.
 
+## Architecture diagrams
+
+These two diagrams were added in this fork. Each image has its Mermaid source underneath, so it can be edited as text.
+
+### Where Auto Ontology sits in the five-layer ontology stack
+
+Capture the ontology, connect it to data, retrieve facts, reason with rules, then act and govern. The dashed red box marks the one layer that is only partly covered.
+
+![Auto Ontology mapped to the five-layer ontology stack](docs/assets/auto-ontology-layers.png)
+
+<details>
+<summary>Mermaid source</summary>
+
+```mermaid
+flowchart LR
+    subgraph L1["1. Capture: build the ontology"]
+        A1["An AI model reads table and column metadata and drafts business terms and joins"]
+        B1["Start from the data you have; the model drafts, people certify"]
+    end
+    subgraph L2["2. Connect: link it to the real data"]
+        A2["Connects to ten database engines, including DuckDB; the ontology is stored in Postgres"]
+    end
+    subgraph L3["3. Retrieve: find the right facts"]
+        A3["Searches terms and columns by meaning, then re-ranks the candidates"]
+        B3["Retrieve first, then write the SQL from what was found"]
+    end
+    subgraph L4["4. Reason: apply rules with code"]
+        A4["Partly: the model still writes the SQL; certified formulas are reused; checks and repairs"]
+        B4["Gap: no rules reasoner, and no test that repeated questions give the same answer"]
+    end
+    subgraph L5["5. Act and govern: decide, explain, comply"]
+        A5["People certify the ontology; MCP, API and CLI for agents; user permissions"]
+        B5["Every answer shows its SQL; it says so when the data cannot answer"]
+    end
+    L1 --> L2 --> L3 --> L4 --> L5
+    style A4 stroke:#C0392B,stroke-dasharray: 5 5
+    style B4 stroke:#C0392B,stroke-dasharray: 5 5
+```
+
+</details>
+
+### Technology stack: which part calls the next
+
+Solid arrows, numbered 1 to 7, show answering a question. Dashed arrows lettered A to D show building the ontology. Arrow A is an assumption: the docs do not say what starts compilation.
+
+![Auto Ontology technology stack, showing which part calls the next](docs/assets/auto-ontology-call-flow.png)
+
+<details>
+<summary>Mermaid source</summary>
+
+```mermaid
+flowchart TD
+    Browser["Browser<br/>Chat, catalog and settings UI"]
+    REST["REST client<br/>Script using an API token"]
+    Agent["AI agent<br/>Cursor or Claude Desktop"]
+    MCP["MCP server (FastMCP)<br/>port 3003, read-only tools"]
+    FE["Frontend and API gateway<br/>Next.js, Better Auth, Prisma<br/>port 3000, the only public entry point"]
+    BE["Backend (FastAPI, LangChain)<br/>port 3001<br/>question-to-SQL agent, catalog and ontology APIs"]
+    ING["Ingestion service (FastAPI)<br/>port 3002<br/>reads sources, builds the ontology"]
+    NIM["NVIDIA NIM models<br/>reasoning, light model, embeddings, reranker"]
+    PG[("Postgres + pgvector<br/>catalog, ontology, embeddings")]
+    SRC[("Your source databases<br/>ten engines, for example DuckDB")]
+    KUMO["KumoRFM (optional)<br/>hosted service for predictive questions"]
+    VAULT["HashiCorp Vault (optional)<br/>keeps source passwords out of Postgres"]
+
+    Browser -->|"1 chat"| FE
+    REST -->|"1 API call"| FE
+    Agent -->|"1 tool call"| MCP
+    MCP -->|"2 API"| FE
+    FE -->|"3 question + user id"| BE
+    BE -->|"4 find terms"| PG
+    BE -->|"5 write SQL"| NIM
+    BE -->|"6 run SQL"| SRC
+    BE -.->|"7 predictions"| KUMO
+    FE -.->|"A start (assumed)"| ING
+    ING -.->|"B read schemas"| SRC
+    ING -.->|"C name terms"| NIM
+    ING -.->|"D save ontology"| PG
+```
+
+</details>
 ## Use it from your agent
 
 ### MCP server
