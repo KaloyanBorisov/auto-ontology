@@ -275,7 +275,7 @@ their own. Clients go through the web app on port 3000.
 
 ## Architecture diagrams
 
-These two diagrams were added in this fork. Each image has its Mermaid source underneath, so it can be edited as text.
+These two diagrams were added in this fork and drawn with the diagram-design skill. Each image has its Mermaid source underneath, so it can be edited as text.
 
 ### Where Auto Ontology sits in the five-layer ontology stack
 
